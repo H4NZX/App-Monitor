@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import sqlite3
 import os
 import json
-from collections import Counter
+from collections import Counter, defaultdict
 from tkinter import messagebox
 from PIL import Image, ImageTk
 
@@ -37,14 +37,14 @@ def log_active_app(app_name, duration):
                       (app_name, duration, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
             conn.commit()
             conn.close()
-            log_app_usage(app_name)
+            log_app_usage(app_name, duration)
         except Exception as e:
             print(f"Ошибка при логировании приложения: {e}")
 
 app_usage_data = []
 
-def log_app_usage(app_name):
-    app_usage_data.append((app_name, datetime.now()))
+def log_app_usage(app_name, duration):
+    app_usage_data.append((app_name, duration, datetime.now()))
 
 def get_top_apps(period='week'):
     now = datetime.now()
@@ -55,9 +55,13 @@ def get_top_apps(period='week'):
     else:
         raise ValueError("Период должен быть 'week' или 'month'.")
 
-    filtered_data = [app for app in app_usage_data if app[1] >= start_time]
-    app_counts = Counter(app[0] for app in filtered_data)
-    top_apps = app_counts.most_common(5)
+    filtered_data = [app for app in app_usage_data if app[2] >= start_time]
+    app_counts = defaultdict(int)
+    
+    for app, duration, _ in filtered_data:
+        app_counts[app] += duration
+
+    top_apps = sorted(app_counts.items(), key=lambda x: x[1], reverse=True)[:5]
     
     return top_apps
 
@@ -67,6 +71,7 @@ class AppTracker:
         self.is_tracking = False
         self.current_app = None
         self.app_start_time = None
+        self.total_duration = 0  # Общее время, проведенное в текущем приложении
         self.min_duration = min_duration
 
         self.frame = tk.Frame(master, bg="#2E2E2E")
@@ -106,11 +111,14 @@ class AppTracker:
         self.is_tracking = True
         self.status_label.config(text="Статус: Отслеживание начато.")
         threading.Thread(target=self.track_apps, daemon=True).start()
+        self.show_time_window()
 
     def stop_tracking(self):
         self.is_tracking = False
         self.status_label.config(text="Статус: Не отслеживается.")
         self.update_top_apps()
+        if hasattr(self, 'time_window'):
+            self.time_window.destroy()
 
     def track_apps(self):
         while self.is_tracking:
@@ -120,10 +128,17 @@ class AppTracker:
                     app_name = active_window.title
                     if app_name != self.current_app:
                         if self.current_app:
+                            # Логируем общее время, проведенное в текущем приложении
                             duration = int(time.time() - self.app_start_time)
-                            log_active_app(self.current_app, duration)
+                            self.total_duration += duration
+                            log_active_app(self.current_app, self.total_duration)  # Логируем общее время
                         self.current_app = app_name
-                        self.app_start_time = time.time()
+                        self.app_start_time = time.time()  # Сбрасываем время начала для нового приложения
+                        self.total_duration = 0  # Сбрасываем общее время для нового приложения
+                    else:
+                        # Если приложение не изменилось, просто обновляем общее время
+                        self.total_duration += int(time.time() - self.app_start_time)
+                        self.app_start_time = time.time()  # Обновляем время начала
                 time.sleep(1)
             except Exception as e:
                 print(f"Ошибка при отслеживании активного приложения: {e}")
@@ -133,23 +148,44 @@ class AppTracker:
         self.top_month_apps_listbox.delete(0, tk.END)
 
         top_weekly_apps = get_top_apps('week')
-        for app, count in top_weekly_apps:
-            self.top_apps_listbox.insert(tk.END, f"{app}: {count} раз")
+        for app, duration in top_weekly_apps:
+            self.top_apps_listbox.insert(tk.END, f"{app}: {duration} секунд")
 
         top_monthly_apps = get_top_apps('month')
-        for app, count in top_monthly_apps:
-            self.top_month_apps_listbox.insert(tk.END, f"{app}: {count} раз")
+        for app, duration in top_monthly_apps:
+            self.top_month_apps_listbox.insert(tk.END, f"{app}: {duration} секунд")
 
     def export_data(self):
         try:
             with open('app_usage_report.txt', 'w') as f:
                 f.write("Отчет о времени использования приложений\n")
                 f.write("====================================\n")
-                for app, timestamp in app_usage_data:
-                    f.write(f"{app} использовалось в {timestamp}\n")
+                for app, duration, timestamp in app_usage_data:
+                    f.write(f"{app} использовалось в {timestamp} на {duration} секунд\n")
             messagebox.showinfo("Экспорт данных", "Данные успешно экспортированы в app_usage_report.txt!")
         except Exception as e:
             messagebox.showerror("Ошибка", f"Не удалось экспортировать данные: {e}")
+
+    def show_time_window(self):
+        self.time_window = tk.Toplevel(self.master)
+        self.time_window.overrideredirect(True)  # Убираем рамку и заголовок окна
+        self.time_window.attributes("-alpha", 0.7)  # Прозрачность окна
+        self.time_window.attributes("-topmost", True)  # Окно всегда поверх других окон
+        self.time_window.geometry("+10+10")  # Позиция окна в верхнем левом углу
+
+        self.time_label = tk.Label(self.time_window, text="00:00:00", font=("Arial", 12), bg="black", fg="white")
+        self.time_label.pack()
+
+        self.update_time()
+
+    def update_time(self):
+        if self.is_tracking:
+            elapsed_time = self.total_duration  # Используем общее время
+            hours, remainder = divmod(elapsed_time, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            time_str = f"{hours:02}:{minutes:02}:{seconds:02}"
+            self.time_label.config(text=time_str)
+            self.time_window.after(1000, self.update_time)
 
 if __name__ == "__main__":
     load_config()
